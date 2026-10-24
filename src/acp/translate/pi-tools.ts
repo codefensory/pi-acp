@@ -1,3 +1,38 @@
+/**
+ * Human-readable ACP title for a tool call. Most tools are identified by their
+ * name alone; the subagent tool carries the identity of the agent it spawns.
+ */
+export function toolTitle(toolName: string, args: unknown): string {
+  if (toolName !== 'subagent') return toolName
+
+  const type = typeof (args as any)?.subagent_type === 'string' ? (args as any).subagent_type.trim() : ''
+  const description = typeof (args as any)?.description === 'string' ? (args as any).description.trim() : ''
+
+  if (type && description) return `${type}: ${description}`
+  return type || description || toolName
+}
+
+/**
+ * One-line progress for a subagent from the details the extension streams with
+ * each partial result (activity, tool uses, tokens, elapsed time).
+ * Returns undefined for any other tool's partial result.
+ */
+export function subagentProgressText(partialResult: unknown): string | undefined {
+  const details = (partialResult as any)?.details
+  if (!details || typeof details !== 'object') return undefined
+  if (typeof details.subagentType !== 'string' && typeof details.activity !== 'string') return undefined
+
+  const parts: string[] = []
+  if (typeof details.activity === 'string' && details.activity.trim()) parts.push(details.activity.trim())
+  if (typeof details.toolUses === 'number') parts.push(`${details.toolUses} tool uses`)
+  if (typeof details.tokens === 'string' && details.tokens.trim()) parts.push(details.tokens.trim())
+  if (typeof details.durationMs === 'number' && details.durationMs > 0) {
+    parts.push(`${(details.durationMs / 1000).toFixed(1)}s`)
+  }
+
+  return parts.length ? parts.join(' · ') : undefined
+}
+
 export function toolResultToText(result: unknown): string {
   if (!result) return ''
 

@@ -32,7 +32,10 @@ import {
   bashTerminalOutputMeta,
   isBashTool
 } from './translate/bash.js'
-import { toolResultToText } from './translate/pi-tools.js'
+import { subagentProgressText, toolResultToText, toolTitle } from './translate/pi-tools.js'
+
+/** A subagent streams progress ~12x/s; ACP clients only need a readable cadence. */
+const SUBAGENT_PROGRESS_MIN_INTERVAL_MS = 1000
 
 type SessionCreateParams = {
   cwd: string
@@ -319,6 +322,7 @@ export class PiAcpSession {
   private fileMutationToolCallIds = new Set<string>()
   private bashToolCallIds = new Set<string>()
   private bashOutputSnapshots = new Map<string, string>()
+  private lastSubagentProgressAt = new Map<string, number>()
 
   // Ensure `session/update` notifications are sent in order and can be awaited
   // before completing a `session/prompt` request.
@@ -590,6 +594,7 @@ export class PiAcpSession {
     this.fileMutationToolCallIds.delete(toolCallId)
     this.bashToolCallIds.delete(toolCallId)
     this.bashOutputSnapshots.delete(toolCallId)
+    this.lastSubagentProgressAt.delete(toolCallId)
   }
 
   private startTurn(t: QueuedTurn): void {
@@ -712,7 +717,7 @@ export class PiAcpSession {
               this.emit({
                 sessionUpdate: 'tool_call',
                 toolCallId,
-                title: toolName,
+                title: toolTitle(toolName, rawInput),
                 kind: toToolKind(toolName),
                 status,
                 locations,
@@ -721,9 +726,11 @@ export class PiAcpSession {
             } else {
               // Best-effort: keep rawInput updated while args are streaming.
               // Keep the existing status (pending or in_progress).
+              const title = toolTitle(toolName, rawInput)
               this.emit({
                 sessionUpdate: 'tool_call_update',
                 toolCallId,
+                ...(title !== toolName ? { title } : {}),
                 status,
                 locations,
                 rawInput
@@ -793,7 +800,7 @@ export class PiAcpSession {
           this.emit({
             sessionUpdate: 'tool_call',
             toolCallId,
-            title: toolName,
+            title: toolTitle(toolName, args),
             kind: toToolKind(toolName),
             status: 'in_progress',
             locations,
@@ -820,6 +827,20 @@ export class PiAcpSession {
         const partial = (ev as any).partialResult
         if (this.bashToolCallIds.has(toolCallId)) {
           this.emitBashOutputUpdate({ toolCallId, status: 'in_progress', result: partial })
+          break
+        }
+
+        const progress = subagentProgressText(partial)
+        if (progress) {
+          const now = Date.now()
+          if (now - (this.lastSubagentProgressAt.get(toolCallId) ?? 0) < SUBAGENT_PROGRESS_MIN_INTERVAL_MS) break
+          this.lastSubagentProgressAt.set(toolCallId, now)
+          this.emit({
+            sessionUpdate: 'tool_call_update',
+            toolCallId,
+            status: 'in_progress',
+            content: [{ type: 'content', content: { type: 'text', text: progress } }] satisfies ToolCallContent[]
+          })
           break
         }
 
