@@ -146,3 +146,52 @@ test('PiAcpSession: a failed subagent settles idle/error', async () => {
   const idle = (conn.updates.map(u => u.update as any)).filter(u => u.sessionUpdate === 'subagent_update').at(-1)
   assert.deepEqual(idle.state, { state: 'idle', stopReason: 'error' })
 })
+
+test('PiAcpSession: a tool that publishes details.plan drives the task panel', async () => {
+  const { conn, proc } = makeSession()
+
+  proc.emit({ type: 'tool_execution_start', toolCallId: 't1', toolName: 'climier_flow', args: { action: 'run', task_id: 'T-1', wait: true } })
+  proc.emit({
+    type: 'tool_execution_update',
+    toolCallId: 't1',
+    toolName: 'climier_flow',
+    partialResult: {
+      content: [{ type: 'text', text: 'waiting for T-1 (worker_running)…' }],
+      details: {
+        activity: { label: 'Flow', target: 'status T-1', meta: 'worker_running · waiting', phase: 'running' },
+        plan: { id: 'flow', entries: [{ content: 'prepare', status: 'completed' }, { content: 'work', status: 'in_progress' }] }
+      }
+    }
+  })
+  // The same plan polled again must not be resent.
+  proc.emit({
+    type: 'tool_execution_update',
+    toolCallId: 't1',
+    toolName: 'climier_flow',
+    partialResult: {
+      details: {
+        activity: { label: 'Flow', target: 'status T-1', meta: 'worker_running · waiting' },
+        plan: { id: 'flow', entries: [{ content: 'prepare', status: 'completed' }, { content: 'work', status: 'in_progress' }] }
+      }
+    }
+  })
+  proc.emit({ type: 'tool_execution_end', toolCallId: 't1', toolName: 'climier_flow', isError: false, result: { content: [{ type: 'text', text: 'done' }] } })
+
+  await new Promise(r => setTimeout(r, 0))
+
+  const updates = conn.updates.map(u => u.update as any)
+  const plans = updates.filter(u => u.sessionUpdate === 'plan_update')
+  assert.equal(plans.length, 1, 'one plan update for two identical polls')
+  assert.deepEqual(plans[0].plan, {
+    type: 'items',
+    planId: 'flow',
+    entries: [
+      { content: 'prepare', priority: 'medium', status: 'completed' },
+      { content: 'work', priority: 'medium', status: 'in_progress' }
+    ]
+  })
+  assert.deepEqual(updates.filter(u => u.sessionUpdate === 'plan_removed'), [{ sessionUpdate: 'plan_removed', planId: 'flow' }], 'the panel clears when the tool finishes')
+
+  const progress = updates.filter(u => u.sessionUpdate === 'tool_call_update' && u.content)
+  assert.deepEqual(progress[0].content, [{ type: 'content', content: { type: 'text', text: 'Flow · status T-1 · worker_running · waiting' } }])
+})

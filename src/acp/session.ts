@@ -32,10 +32,10 @@ import {
   bashTerminalOutputMeta,
   isBashTool
 } from './translate/bash.js'
-import { subagentProgressText, toolResultToText, toolTitle } from './translate/pi-tools.js'
+import { planSnapshot, progressText, toolResultToText, toolTitle } from './translate/pi-tools.js'
 
-/** A subagent streams progress ~12x/s; ACP clients only need a readable cadence. */
-const SUBAGENT_PROGRESS_MIN_INTERVAL_MS = 1000
+/** Tools poll their own progress fast (a flow every 800ms, a subagent every 80ms); ACP clients only need a readable cadence. */
+const PROGRESS_MIN_INTERVAL_MS = 1000
 
 type SessionCreateParams = {
   cwd: string
@@ -322,7 +322,9 @@ export class PiAcpSession {
   private fileMutationToolCallIds = new Set<string>()
   private bashToolCallIds = new Set<string>()
   private bashOutputSnapshots = new Map<string, string>()
-  private lastSubagentProgressAt = new Map<string, number>()
+  private lastProgressAt = new Map<string, number>()
+  // Last plan a tool published, per tool call, so an unchanged poll is not resent.
+  private publishedPlans = new Map<string, { id: string; json: string }>()
   // ACP subagent sessions announced for `subagent` tool calls: toolCallId -> child sessionId.
   private subagentSessions = new Map<string, string>()
 
@@ -602,7 +604,8 @@ export class PiAcpSession {
     this.fileMutationToolCallIds.delete(toolCallId)
     this.bashToolCallIds.delete(toolCallId)
     this.bashOutputSnapshots.delete(toolCallId)
-    this.lastSubagentProgressAt.delete(toolCallId)
+    this.lastProgressAt.delete(toolCallId)
+    this.publishedPlans.delete(toolCallId)
     this.subagentSessions.delete(toolCallId)
   }
 
@@ -851,11 +854,28 @@ export class PiAcpSession {
           break
         }
 
-        const progress = subagentProgressText(partial)
+        const progress = progressText(partial)
+
+        const plan = planSnapshot(partial, String((ev as any).toolName ?? 'tool'))
+        if (plan) {
+          const json = JSON.stringify(plan.entries)
+          const previous = this.publishedPlans.get(toolCallId)
+          if (previous?.json !== json || previous?.id !== plan.id) {
+            this.publishedPlans.set(toolCallId, { id: plan.id, json })
+            if (plan.entries.length) {
+              this.emit({
+                sessionUpdate: 'plan_update',
+                plan: { type: 'items', planId: plan.id, entries: plan.entries }
+              } as unknown as SessionUpdate)
+            } else {
+              this.emit({ sessionUpdate: 'plan_removed', planId: plan.id } as unknown as SessionUpdate)
+            }
+          }
+        }
         if (progress) {
           const now = Date.now()
-          if (now - (this.lastSubagentProgressAt.get(toolCallId) ?? 0) < SUBAGENT_PROGRESS_MIN_INTERVAL_MS) break
-          this.lastSubagentProgressAt.set(toolCallId, now)
+          if (now - (this.lastProgressAt.get(toolCallId) ?? 0) < PROGRESS_MIN_INTERVAL_MS) break
+          this.lastProgressAt.set(toolCallId, now)
           this.emit({
             sessionUpdate: 'tool_call_update',
             toolCallId,
@@ -903,6 +923,12 @@ export class PiAcpSession {
           this.emitSubagentUpdate(childSessionId, {
             state: { state: 'idle', stopReason: isError ? 'error' : this.cancelRequested ? 'cancelled' : 'end_turn' }
           })
+        }
+
+        // The work this plan tracked is over: clear the client's task panel.
+        const publishedPlan = this.publishedPlans.get(toolCallId)
+        if (publishedPlan && publishedPlan.json !== '[]') {
+          this.emit({ sessionUpdate: 'plan_removed', planId: publishedPlan.id } as unknown as SessionUpdate)
         }
 
         const snapshot = this.fileSnapshots.get(toolCallId)
