@@ -925,9 +925,20 @@ export class PiAcpSession {
           })
         }
 
-        // The work this plan tracked is over: clear the client's task panel.
+        // The call's final plan snapshot wins over removal: the client keeps the
+        // finished plan as the record of what this call did.
+        const toolName = String((ev as any).toolName ?? 'tool')
+        const finalPlan = planSnapshot(result, toolName)
         const publishedPlan = this.publishedPlans.get(toolCallId)
-        if (publishedPlan && publishedPlan.json !== '[]') {
+        if (finalPlan && finalPlan.entries.length) {
+          const json = JSON.stringify(finalPlan.entries)
+          if (publishedPlan?.json !== json || publishedPlan?.id !== finalPlan.id) {
+            this.emit({
+              sessionUpdate: 'plan_update',
+              plan: { type: 'items', planId: finalPlan.id, entries: finalPlan.entries }
+            } as unknown as SessionUpdate)
+          }
+        } else if (publishedPlan && publishedPlan.json !== '[]') {
           this.emit({ sessionUpdate: 'plan_removed', planId: publishedPlan.id } as unknown as SessionUpdate)
         }
 

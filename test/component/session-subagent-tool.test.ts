@@ -195,3 +195,36 @@ test('PiAcpSession: a tool that publishes details.plan drives the task panel', a
   const progress = updates.filter(u => u.sessionUpdate === 'tool_call_update' && u.content)
   assert.deepEqual(progress[0].content, [{ type: 'content', content: { type: 'text', text: 'Flow · status T-1 · worker_running · waiting' } }])
 })
+
+test('PiAcpSession: the final plan snapshot is published instead of removed', async () => {
+  const { conn, proc } = makeSession()
+
+  proc.emit({ type: 'tool_execution_start', toolCallId: 't1', toolName: 'climier_flow', args: { action: 'run', task_id: 'T-1', wait: true } })
+  proc.emit({
+    type: 'tool_execution_update',
+    toolCallId: 't1',
+    toolName: 'climier_flow',
+    partialResult: { details: { plan: { id: 'flow:T-1', entries: [{ content: 'prepare', status: 'in_progress' }] } } }
+  })
+  proc.emit({
+    type: 'tool_execution_end',
+    toolCallId: 't1',
+    toolName: 'climier_flow',
+    isError: false,
+    result: {
+      content: [{ type: 'text', text: 'Launched run for T-1.' }],
+      details: { plan: { id: 'flow:T-1', entries: [{ content: 'prepare', status: 'completed' }, { content: 'work', status: 'completed' }] } }
+    }
+  })
+
+  await new Promise(r => setTimeout(r, 0))
+
+  const updates = conn.updates.map(u => u.update as any)
+  const plans = updates.filter(u => u.sessionUpdate === 'plan_update')
+  assert.equal(plans.length, 2, 'live plan, then the settled one')
+  assert.deepEqual(plans[1].plan.entries, [
+    { content: 'prepare', priority: 'medium', status: 'completed' },
+    { content: 'work', priority: 'medium', status: 'completed' }
+  ])
+  assert.equal(updates.filter(u => u.sessionUpdate === 'plan_removed').length, 0)
+})
