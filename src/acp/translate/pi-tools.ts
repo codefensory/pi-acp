@@ -14,7 +14,8 @@ export function toolTitle(toolName: string, args: unknown): string {
     return type || description || toolName
   }
 
-  const subject = str(a.description) || str(a.command) || str(a.path) || str(a.pattern) || str(a.query)
+  // A search tool is identified by what it looks for, a file tool by its path.
+  const subject = str(a.description) || str(a.pattern) || str(a.query) || str(a.path) || str(a.command)
   if (subject) return `${toolName}: ${subject}`
 
   // Tools that name a verb and a target instead (`climier_flow {action, task_id}`).
@@ -140,4 +141,29 @@ export function toolResultToText(result: unknown): string {
   } catch {
     return String(result)
   }
+}
+
+const TOOL_KINDS: Record<string, string> = {
+  read: 'read',
+  write: 'edit',
+  edit: 'edit',
+  ls: 'read',
+  list: 'read',
+  list_dir: 'read',
+  grep: 'search',
+  glob: 'search',
+  find: 'search',
+  web_search: 'fetch',
+  web_fetch: 'fetch',
+  fetch: 'fetch',
+  todo: 'think',
+  todo_write: 'think',
+  bash: 'execute',
+  shell: 'execute',
+  run_code: 'execute'
+}
+
+/** ACP tool kind: the icon and grouping a client gives the tool call. */
+export function toolKind(toolName: string): string {
+  return TOOL_KINDS[toolName] ?? 'other'
 }

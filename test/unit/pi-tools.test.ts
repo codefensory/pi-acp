@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { planSnapshot, progressText, toolResultToText, toolTitle } from '../../src/acp/translate/pi-tools.js'
+import { planSnapshot, progressText, toolKind, toolResultToText, toolTitle } from '../../src/acp/translate/pi-tools.js'
 
 test('toolResultToText: extracts text from content blocks', () => {
   const text = toolResultToText({
@@ -111,4 +111,21 @@ test('planSnapshot: accepts a bare entry array and drops nameless entries', () =
 test('planSnapshot: ignores details with no plan', () => {
   assert.equal(planSnapshot({ details: { activity: 'x' } }, 'climier_flow'), undefined)
   assert.equal(planSnapshot({ details: { plan: { entries: 'nope' } } }, 'climier_flow'), undefined)
+})
+
+test('toolKind: maps search, file and shell tools to their ACP kind', () => {
+  assert.equal(toolKind('grep'), 'search')
+  assert.equal(toolKind('glob'), 'search')
+  assert.equal(toolKind('find'), 'search')
+  assert.equal(toolKind('read'), 'read')
+  assert.equal(toolKind('ls'), 'read')
+  assert.equal(toolKind('write'), 'edit')
+  assert.equal(toolKind('bash'), 'execute')
+  assert.equal(toolKind('web_search'), 'fetch')
+  assert.equal(toolKind('todo'), 'think')
+  assert.equal(toolKind('subagent'), 'other')
+})
+
+test('toolTitle: a search tool is titled by what it looks for', () => {
+  assert.equal(toolTitle('grep', { pattern: 'subagentProgressText', path: 'src' }), 'grep: subagentProgressText')
 })

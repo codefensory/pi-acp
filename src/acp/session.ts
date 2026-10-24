@@ -32,7 +32,7 @@ import {
   bashTerminalOutputMeta,
   isBashTool
 } from './translate/bash.js'
-import { planSnapshot, progressText, toolResultToText, toolTitle } from './translate/pi-tools.js'
+import { planSnapshot, progressText, toolKind, toolResultToText, toolTitle } from './translate/pi-tools.js'
 
 /** Tools poll their own progress fast (a flow every 800ms, a subagent every 80ms); ACP clients only need a readable cadence. */
 const PROGRESS_MIN_INTERVAL_MS = 1000
@@ -730,7 +730,7 @@ export class PiAcpSession {
                 sessionUpdate: 'tool_call',
                 toolCallId,
                 title: toolTitle(toolName, rawInput),
-                kind: toToolKind(toolName),
+                kind: toolKind(toolName) as ToolKind,
                 status,
                 locations,
                 rawInput
@@ -825,7 +825,7 @@ export class PiAcpSession {
             sessionUpdate: 'tool_call',
             toolCallId,
             title: toolTitle(toolName, args),
-            kind: toToolKind(toolName),
+            kind: toolKind(toolName) as ToolKind,
             status: 'in_progress',
             locations,
             rawInput: args
@@ -1200,16 +1200,4 @@ function formatAutoRetryMessage(ev: PiRpcEvent): string {
   return `Retrying (attempt ${attempt}/${maxAttempts}, waiting ${delaySeconds}s)...`
 }
 
-function toToolKind(toolName: string): ToolKind {
-  switch (toolName) {
-    case 'read':
-      return 'read'
-    case 'write':
-    case 'edit':
-      return 'edit'
-    case 'bash':
-      return 'execute'
-    default:
-      return 'other'
-  }
-}
+
