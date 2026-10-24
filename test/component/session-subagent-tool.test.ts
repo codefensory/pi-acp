@@ -228,3 +228,110 @@ test('PiAcpSession: the final plan snapshot is published instead of removed', as
   ])
   assert.equal(updates.filter(u => u.sessionUpdate === 'plan_removed').length, 0)
 })
+
+test('PiAcpSession: acp.children entries announce extension-owned work as child sessions', async () => {
+  const { conn, proc } = makeSession()
+
+  const entry = (children: unknown[]) => ({ type: 'custom', customType: 'acp.children', data: { children } })
+
+  proc.emit({
+    type: 'entry_appended',
+    entry: entry([
+      { id: 'flow:T-1', title: 'Flow T-1 · refactor auth', description: 'work · worker', state: 'running' },
+      { id: 'flow:T-2', title: 'Flow T-2 · docs', description: 'review', state: 'running' }
+    ])
+  })
+  // Same snapshot again: nothing to resend.
+  proc.emit({
+    type: 'entry_appended',
+    entry: entry([
+      { id: 'flow:T-1', title: 'Flow T-1 · refactor auth', description: 'work · worker', state: 'running' },
+      { id: 'flow:T-2', title: 'Flow T-2 · docs', description: 'review', state: 'running' }
+    ])
+  })
+  // T-2 advanced to a new node.
+  proc.emit({
+    type: 'entry_appended',
+    entry: entry([
+      { id: 'flow:T-1', title: 'Flow T-1 · refactor auth', description: 'work · worker', state: 'running' },
+      { id: 'flow:T-2', title: 'Flow T-2 · docs', description: 'integration · merger', state: 'running' }
+    ])
+  })
+  // T-1 stopped; T-2 is no longer in the snapshot and must keep its last state.
+  proc.emit({
+    type: 'entry_appended',
+    entry: entry([{ id: 'flow:T-1', title: 'Flow T-1 · refactor auth', description: 'work · worker', state: 'idle' }])
+  })
+  // Not our contract.
+  proc.emit({ type: 'entry_appended', entry: { type: 'custom', customType: 'climier-flow.owned', data: { taskId: 'T-1' } } })
+
+  await new Promise(r => setTimeout(r, 0))
+
+  const children = conn.updates.map(u => u.update as any).filter(u => u.sessionUpdate === 'subagent_update')
+  assert.deepEqual(
+    children.map(c => [c.sessionId, c.description ?? null, c.state.state, c.state.stopReason ?? null]),
+    [
+      ['flow:T-1', 'work · worker', 'running', null],
+      ['flow:T-2', 'review', 'running', null],
+      ['flow:T-2', 'integration · merger', 'running', null],
+      ['flow:T-1', 'work · worker', 'idle', 'end_turn']
+    ]
+  )
+  assert.deepEqual(children[0].title, 'Flow T-1 · refactor auth')
+  assert.equal(conn.updates.every(u => u.sessionId === 's1'), true, 'children ride the parent session')
+})
+
+test('PiAcpSession: polls session entries so extension children reach the client', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+  proc.sessionEntries = [
+    { id: 'e1', type: 'message', message: { role: 'user', content: 'hi' } },
+    {
+      id: 'e2',
+      type: 'custom',
+      customType: 'acp.children',
+      data: {
+        children: [
+          { id: 'flow:T-1', title: 'Flow T-1 · auth', description: 'work · worker', state: 'running' },
+          { id: 'flow:T-2', title: 'Flow T-2 · docs', description: 'review', state: 'running' }
+        ]
+      }
+    }
+  ]
+  new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: [],
+    entryPollMs: 5
+  })
+
+  await new Promise(r => setTimeout(r, 40))
+
+  let children = conn.updates.map(u => u.update as any).filter(u => u.sessionUpdate === 'subagent_update')
+  assert.deepEqual(children.map(c => c.sessionId), ['flow:T-1', 'flow:T-2'])
+
+  // A later snapshot settles one and advances the other; the cursor keeps it incremental.
+  proc.sessionEntries.push({
+    id: 'e3',
+    type: 'custom',
+    customType: 'acp.children',
+    data: {
+      children: [
+        { id: 'flow:T-1', title: 'Flow T-1 · auth', description: 'review · validator', state: 'running' },
+        { id: 'flow:T-2', title: 'Flow T-2 · docs', description: 'review', state: 'idle' }
+      ]
+    }
+  })
+
+  await new Promise(r => setTimeout(r, 40))
+
+  children = conn.updates.map(u => u.update as any).filter(u => u.sessionUpdate === 'subagent_update')
+  const last = children.slice(-2)
+  assert.deepEqual(last.map(c => [c.sessionId, c.description ?? null, c.state]), [
+    ['flow:T-1', 'review · validator', { state: 'running' }],
+    ['flow:T-2', 'review', { state: 'idle', stopReason: 'end_turn' }]
+  ])
+})

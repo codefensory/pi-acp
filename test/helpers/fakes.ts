@@ -74,6 +74,14 @@ export class FakePiRpcProcess {
     return { messages: [] }
   }
 
+  /** Entries the session's `get_entries` poller will see, newest last. */
+  sessionEntries: Array<Record<string, unknown>> = []
+
+  async getEntries(since?: string): Promise<any> {
+    const at = since ? this.sessionEntries.findIndex(entry => entry.id === since) : -1
+    return { entries: this.sessionEntries.slice(at + 1) }
+  }
+
   async getSessionStats(): Promise<PiSessionStats> {
     this.getSessionStatsCount += 1
     if (this.sessionStatsError) throw this.sessionStatsError

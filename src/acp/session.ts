@@ -34,6 +34,9 @@ import {
 } from './translate/bash.js'
 import { planSnapshot, progressText, toolKind, toolResultToText, toolTitle } from './translate/pi-tools.js'
 
+/** How often the parent asks pi for new session entries (extension-owned child sessions). */
+const ENTRY_POLL_MS = 1000
+
 /** Tools poll their own progress fast (a flow every 800ms, a subagent every 80ms); ACP clients only need a readable cadence. */
 const PROGRESS_MIN_INTERVAL_MS = 1000
 
@@ -195,6 +198,7 @@ export class SessionManager {
     const s = this.sessions.get(sessionId)
     if (!s) return
     try {
+      s.dispose()
       s.proc.dispose?.()
     } catch {
       // ignore
@@ -327,6 +331,11 @@ export class PiAcpSession {
   private publishedPlans = new Map<string, { id: string; json: string }>()
   // ACP subagent sessions announced for `subagent` tool calls: toolCallId -> child sessionId.
   private subagentSessions = new Map<string, string>()
+  // Child sessions an extension publishes through `acp.children` entries: id -> last emitted fields.
+  private externalChildren = new Map<string, string>()
+  private entriesCursor: string | undefined
+  private entryPollTimer: ReturnType<typeof setInterval> | undefined
+  private entryPollBusy = false
 
   // Ensure `session/update` notifications are sent in order and can be awaited
   // before completing a `session/prompt` request.
@@ -340,6 +349,7 @@ export class PiAcpSession {
     conn: AgentSideConnection
     fileCommands?: FileSlashCommand[]
     autoTitle?: boolean
+    entryPollMs?: number
   }) {
     this.sessionId = opts.sessionId
     this.cwd = opts.cwd
@@ -350,6 +360,37 @@ export class PiAcpSession {
     this.initialTitlePending = opts.autoTitle ?? false
 
     this.proc.onEvent(ev => this.handlePiEvent(ev))
+
+    this.entryPollTimer = setInterval(() => void this.pollEntries(), opts.entryPollMs ?? ENTRY_POLL_MS)
+    this.entryPollTimer.unref?.()
+  }
+
+  /** Stop background work that outlives a request. */
+  dispose(): void {
+    if (this.entryPollTimer) clearInterval(this.entryPollTimer)
+    this.entryPollTimer = undefined
+  }
+
+  /**
+   * Extensions publish session-level state — an `acp.children` snapshot, for one
+   * — as custom session entries. pi does not stream those entries to an RPC
+   * client, so the client asks for the ones it has not seen, keeping a cursor.
+   */
+  private async pollEntries(): Promise<void> {
+    if (this.entryPollBusy) return
+    this.entryPollBusy = true
+    try {
+      const data = (await this.proc.getEntries(this.entriesCursor)) as any
+      const entries = Array.isArray(data?.entries) ? data.entries : []
+      for (const entry of entries) {
+        if (typeof entry?.id === 'string') this.entriesCursor = entry.id
+        this.handleChildSnapshot(entry)
+      }
+    } catch {
+      // Best effort: pi may still be starting, busy, or gone.
+    } finally {
+      this.entryPollBusy = false
+    }
   }
 
   setStartupInfo(text: string) {
@@ -590,6 +631,38 @@ export class PiAcpSession {
           : {})
       }
     })
+  }
+
+  /**
+   * An extension that owns work a client should see as its own session appends
+   * `acp.children` entries: a snapshot of `{id, title, description, state}`
+   * children. New or changed children become `subagent_update` frames on this
+   * session; a child that leaves the snapshot is left as it was, because the
+   * snapshot reports presence, not deletion.
+   */
+  private handleChildSnapshot(entry: unknown): void {
+    const anyEntry = entry as any
+    if (anyEntry?.type !== 'custom' || anyEntry?.customType !== 'acp.children') return
+    const children = anyEntry?.data?.children
+    if (!Array.isArray(children)) return
+
+    for (const child of children) {
+      const id = typeof child?.id === 'string' ? child.id.trim() : ''
+      if (!id) continue
+
+      const fields: Record<string, unknown> = {}
+      if (typeof child.title === 'string' && child.title.trim()) fields.title = child.title.trim()
+      if (typeof child.description === 'string' && child.description.trim()) fields.description = child.description.trim()
+      fields.state =
+        child.state === 'idle'
+          ? { state: 'idle', stopReason: typeof child.stopReason === 'string' ? child.stopReason : 'end_turn' }
+          : { state: 'running' }
+
+      const json = JSON.stringify(fields)
+      if (this.externalChildren.get(id) === json) continue
+      this.externalChildren.set(id, json)
+      this.emitSubagentUpdate(id, fields)
+    }
   }
 
   private emitSubagentUpdate(childSessionId: string, fields: Record<string, unknown>): void {
@@ -979,6 +1052,11 @@ export class PiAcpSession {
         })
 
         this.cleanupToolCall(toolCallId)
+        break
+      }
+
+      case 'entry_appended': {
+        this.handleChildSnapshot((ev as any).entry)
         break
       }
 

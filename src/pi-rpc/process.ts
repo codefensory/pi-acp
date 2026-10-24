@@ -51,6 +51,8 @@ type PiRpcCommand =
   | { type: 'switch_session'; id?: string; sessionPath: string }
   // Messages
   | { type: 'get_messages'; id?: string }
+  // Session entries (append-only tree, includes extension custom entries)
+  | { type: 'get_entries'; id?: string; since?: string }
   // Commands
   | { type: 'get_commands'; id?: string }
 
@@ -352,6 +354,12 @@ export class PiRpcProcess {
   async getMessages(): Promise<unknown> {
     const res = await this.request({ type: 'get_messages' })
     if (!res.success) throw new Error(`pi get_messages failed: ${res.error ?? JSON.stringify(res.data)}`)
+    return res.data
+  }
+
+  async getEntries(since?: string): Promise<unknown> {
+    const res = await this.request(since ? { type: 'get_entries', since } : { type: 'get_entries' })
+    if (!res.success) throw new Error(`pi get_entries failed: ${res.error ?? JSON.stringify(res.data)}`)
     return res.data
   }
 
