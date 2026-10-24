@@ -323,6 +323,8 @@ export class PiAcpSession {
   private bashToolCallIds = new Set<string>()
   private bashOutputSnapshots = new Map<string, string>()
   private lastSubagentProgressAt = new Map<string, number>()
+  // ACP subagent sessions announced for `subagent` tool calls: toolCallId -> child sessionId.
+  private subagentSessions = new Map<string, string>()
 
   // Ensure `session/update` notifications are sent in order and can be awaited
   // before completing a `session/prompt` request.
@@ -588,6 +590,12 @@ export class PiAcpSession {
     })
   }
 
+  private emitSubagentUpdate(childSessionId: string, fields: Record<string, unknown>): void {
+    // `subagent_update` is an unstable ACP v2 variant that the pinned SDK does
+    // not type yet; the wire shape is the one the ACP schema defines.
+    this.emit({ sessionUpdate: 'subagent_update', sessionId: childSessionId, ...fields } as unknown as SessionUpdate)
+  }
+
   private cleanupToolCall(toolCallId: string): void {
     this.currentToolCalls.delete(toolCallId)
     this.fileSnapshots.delete(toolCallId)
@@ -595,6 +603,7 @@ export class PiAcpSession {
     this.bashToolCallIds.delete(toolCallId)
     this.bashOutputSnapshots.delete(toolCallId)
     this.lastSubagentProgressAt.delete(toolCallId)
+    this.subagentSessions.delete(toolCallId)
   }
 
   private startTurn(t: QueuedTurn): void {
@@ -794,6 +803,18 @@ export class PiAcpSession {
 
         const locations = toToolCallLocations(args, this.cwd, line)
 
+        // Announce the child session before anything can name it (ACP v2
+        // `subagent_update`): clients list it and mirror its state while it runs.
+        if (toolName === 'subagent') {
+          const childSessionId = typeof (args as any)?.id === 'string' ? (args as any).id : crypto.randomUUID()
+          this.subagentSessions.set(toolCallId, childSessionId)
+          this.emitSubagentUpdate(childSessionId, {
+            title: toolTitle(toolName, args),
+            description: typeof (args as any)?.subagent_type === 'string' ? (args as any).subagent_type : null,
+            state: { state: 'running' }
+          })
+        }
+
         // If we already surfaced the tool call while the model streamed it, just transition.
         if (!this.currentToolCalls.has(toolCallId)) {
           this.currentToolCalls.set(toolCallId, 'in_progress')
@@ -876,6 +897,13 @@ export class PiAcpSession {
         }
 
         const text = toolResultToText(result)
+
+        const childSessionId = this.subagentSessions.get(toolCallId)
+        if (childSessionId) {
+          this.emitSubagentUpdate(childSessionId, {
+            state: { state: 'idle', stopReason: isError ? 'error' : this.cancelRequested ? 'cancelled' : 'end_turn' }
+          })
+        }
 
         const snapshot = this.fileSnapshots.get(toolCallId)
         let content: ToolCallContent[] | undefined
